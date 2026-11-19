@@ -9,6 +9,19 @@ log()  { printf '[+] %s\n' "$*"; }
 warn() { printf '[!] %s\n' "$*" >&2; }
 die()  { printf '[x] %s\n' "$*" >&2; exit 1; }
 
+urlencode() {
+  local LC_ALL=C
+  local s="$1" i c hex out=""
+  for ((i = 0; i < ${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      [a-zA-Z0-9._~-]) out+="$c" ;;
+      *) printf -v hex '%%%02X' "'$c"; out+="$hex" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
 if [ "$(id -u)" -ne 0 ]; then
   die "Запускай от root."
 fi
@@ -75,14 +88,14 @@ while true; do
       warn "Пароли не совпали."
       continue
     fi
-    if [ "${#pass}" -lt 12 ] || [[ ! "$pass" =~ ^[A-Za-z0-9_-]+$ ]]; then
-      warn "Пароль: от 12 знаков, латиница, цифры, _ и -."
+    if [ "${#pass}" -lt 12 ] || [[ "$pass" == *\"* || "$pass" == *\\* || "$pass" == *$'\n'* || "$pass" == *$'\r'* ]]; then
+      warn "Пароль: от 12 знаков, без кавычек, обратного слэша и перевода строки."
       continue
     fi
     break
   done
-  USERS_BLOCK="${USERS_BLOCK}    basic_auth ${login} ${pass}"$'\n'
-  USER_LINKS="${USER_LINKS}naive+https://${login}:${pass}@${DOMAIN}:443"$'\n'
+  USERS_BLOCK="${USERS_BLOCK}    basic_auth ${login} \"${pass}\""$'\n'
+  USER_LINKS="${USER_LINKS}naive+https://$(urlencode "$login"):$(urlencode "$pass")@${DOMAIN}:443"$'\n'
   read -r -p "Ещё учётка? [y/N]: " more
   [[ "$more" =~ ^[Yy]$ ]] || break
 done
@@ -109,9 +122,16 @@ net.ipv4.tcp_congestion_control=bbr
 EOF
 sysctl --system >/dev/null || true
 
+SSH_PORT=22
+if [ -n "${SSH_CONNECTION:-}" ]; then
+  SSH_PORT="${SSH_CONNECTION##* }"
+fi
+[[ "$SSH_PORT" =~ ^[0-9]+$ ]] || SSH_PORT=22
 ufw allow 22/tcp >/dev/null || true
+ufw allow "${SSH_PORT}/tcp" >/dev/null || true
 ufw allow 80/tcp >/dev/null || true
 ufw allow 443/tcp >/dev/null || true
+ufw allow 8080/tcp >/dev/null || true
 ufw --force enable >/dev/null || true
 
 log "Установка Go..."
@@ -248,11 +268,17 @@ systemctl enable caddy
 systemctl restart caddy
 
 IP="$(curl -4 -fsS --max-time 8 https://api.ipify.org || true)"
-log "Сервер запущен."
+log "Caddy запущен."
 echo
-echo "A-запись ${DOMAIN} направь на ${IP:-адрес этого VPS}. Прокси облака выключи, иначе сертификат и клиент не сойдутся."
-echo "Старый сервер не выключай, пока с этого VPS не откроется https://${DOMAIN}."
-echo "Если перед ним стоит посредник, запусти на посреднике скрипт 2node ещё раз и укажи новый IP основного."
+if curl -fsS --max-time 20 --resolve "${DOMAIN}:443:127.0.0.1" "https://${DOMAIN}/" -o /dev/null; then
+  log "Сертификат ${DOMAIN} есть, сайт открывается с этого VPS."
+else
+  echo "Сертификата ${DOMAIN} ещё нет. Клиент и посредник не подключатся, пока он не выпустится."
+  echo "A-запись направь на ${IP:-адрес этого VPS}, прокси облака выключи, лишнюю AAAA убери."
+  echo "Caddy доберёт сертификат сам. Потом проверь: curl -I https://${DOMAIN}"
+fi
+echo "Старый сервер не выключай, пока проверка выше не покажет, что сертификат есть."
+echo "На посреднике запусти 2node и впиши IP основного: ${IP:-адрес этого VPS}"
 echo
 echo "Ссылки для клиента. На диск они не записаны:"
 printf '%s' "$USER_LINKS"
